@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2023 Maik Fox <maik.fox@gmail.com>
+# SPDX-License-Identifier: CC0-1.0
+
+[options]
+# stop befory any actual copy or reencode is executed
+dry-run = true
+# delete_source_files is not yet implemented
+delete_source_files = false
+
+[directories]
+# source directory where the files are found (e.g. path to memory card)
+source = "C:\\temp\\importTest\\DCIM"
+# destination directory for the new structure and the copied/reencoded files
+destination = "C:\\temp\\importTest\\TestDestination"
+
+[extensions]
+# array of file extensions that should be copied respectively reencoded.
+# can be case-sensitive on your system.
+# for advanced use cases, masks more advanced than *. can be defined here,
+# the tool however does not check if a single files is matched (and thus
+# processed) multiple times
+copy = ["*.JPG", "*.JPEG"]
+reencode = ["*.MOV"]
+
+[organisation]
+# define a path format for the folder structure used
+# https://docs.rs/chrono/latest/chrono/format/strftime/index.html
+path_format = "%Y\\%m\\%Y-%m-%d"
+# defines a filename prefix, can also be empty
+# https://docs.rs/chrono/latest/chrono/format/strftime/index.html
+filename_prefix ="%Y-%m-%d_"
+
+[encoding]
+# path to local handbrakeCLI executable
+handbrakeCLI = "C:\\temp\\HandBrakeCLI-1.7.0-win-x86_64\\HandBrakeCLI.exe"
+# handbrake CLI options for encoding
+# https://handbrake.fr/docs/en/latest/cli/cli-options.html
+# https://handbrake.fr/docs/en/latest/cli/command-line-reference.html
+#options = "-e x264 -q 20 -B 160"
+#options = "-e nvenc_h264 -q 20 -B 160 --stop-at seconds:10"
+options = "-e nvenc_h264 -q 22 -B 160"
+# change file extension to the following for the output file
+new_file_extension = "mp4"

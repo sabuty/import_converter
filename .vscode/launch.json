@@ -1,0 +1,47 @@
+// SPDX-FileCopyrightText: 2023 Maik Fox <maik.fox@gmail.com>
+// SPDX-License-Identifier: CC0-1.0
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'import_converter'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=import_converter",
+                    "--package=import_converter"
+                ],
+                "filter": {
+                    "name": "import_converter",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'import_converter'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=import_converter",
+                    "--package=import_converter"
+                ],
+                "filter": {
+                    "name": "import_converter",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
