@@ -35,7 +35,7 @@ filename_prefix ="%Y-%m-%d_"
 [encoding]
 # path to local handbrakeCLI executable
 # use the correct folder divider here as well: \\ for windows (escaped \), / for linux
-handbrakeCLI = "C:\\temp\\HandBrakeCLI-1.7.0-win-x86_64\\HandBrakeCLI.exe"
+handbrakeCLI = "C:\\temp\\HandBrakeCLI-1.7.1-win-x86_64\\HandBrakeCLI.exe"
 # handbrake CLI options for encoding
 # https://handbrake.fr/docs/en/latest/cli/cli-options.html
 # https://handbrake.fr/docs/en/latest/cli/command-line-reference.html
