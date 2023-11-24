@@ -226,7 +226,7 @@ fn build_destination_path(settings: &Config, dto: &NaiveDateTime, path: &PathBuf
     let mut new_path = PathBuf::from(destination);
     new_path.push(new_subpath.to_string());
     let new_file_name = prefix.to_string() + file_name;
-    new_path.set_file_name(new_file_name);
+    new_path.push(new_file_name);
 
     return new_path;
 }
