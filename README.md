@@ -8,6 +8,8 @@ SPDX-License-Identifier: EUPL-1.2
 
 The import_converter copies and organizes media files from a source (e.g. a memory card of a digital camera) and reencodes the movies using handbrake.
 
+![import_converter source and destination example](doc/readme-overview.png)
+
 The import_converter repository follows the [REUSE Software Specification](https://reuse.software/spec/) for license attribution.
 
 ## Why does this tool exist?
