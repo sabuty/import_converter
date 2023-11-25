@@ -78,9 +78,11 @@ fn main() {
     // discover files
     println!("collecting files...");
     for mask in &all_masks {
-        // build glob pattern for each extension
-        let pattern = format!("{}\\**\\{}", settings.get_string("directories.source").expect("setting directories.source not found"), mask.extension);
-        for entry in glob(&pattern).expect("Failed to read glob pattern") {
+        // build glob pattern for each extension in an OS independent way by using PathBuf
+        let mut source_dir = PathBuf::from(settings.get_string("directories.source").expect("setting directories.source not found"));
+        source_dir.push("**");
+        source_dir.push(&mask.extension);
+        for entry in glob(source_dir.as_path().to_str().expect("error building glob pattern")).expect("Failed to read glob pattern") {
             match entry {
                 Ok(path) => {
                     // add entry
@@ -193,12 +195,10 @@ fn build_file_entry(settings: &Config, path: &PathBuf, mask: &MaskEntry) -> File
     // file size
     let metadata = fs::metadata(&path);
     let file_len = metadata.expect("failed to read file metadata").len();
-    // build destination path
-    let new_path = build_destination_path(&settings, &dto, &path);
     // build FileEntry
     let mut result = FileEntry {
         source_path: PathBuf::from(&path.display().to_string()),
-        destination_path: PathBuf::from(&new_path),
+        destination_path: build_destination_path(&settings, &dto, &path),
         creation_date: dto,
         creation_date_source: dto_source,
         len: file_len,
@@ -215,15 +215,20 @@ fn build_file_entry(settings: &Config, path: &PathBuf, mask: &MaskEntry) -> File
     return result;
 }
 
-fn build_destination_path(settings: &Config, dto: &NaiveDateTime, path: &PathBuf) -> String {
+fn build_destination_path(settings: &Config, dto: &NaiveDateTime, path: &PathBuf) -> PathBuf {
     let destination = settings.get_string("directories.destination").expect("setting directories.destination not found");
     let destination_format = settings.get_string("organisation.path_format").expect("setting organisation.path_format not found");
     let new_subpath = dto.format(&destination_format);
     let prefix_format = settings.get_string("organisation.filename_prefix").expect("setting organisation.filename_prefix not found");
     let prefix = dto.format(&prefix_format);
     let file_name = path.file_name().expect("filename not part of destination path").to_str().expect("filename to string failed");
-    let new_path = format!("{}\\{}\\{}{}", destination, new_subpath, prefix, file_name);
-    new_path
+    // build new path in an OS independent way
+    let mut new_path = PathBuf::from(destination);
+    new_path.push(new_subpath.to_string());
+    let new_file_name = prefix.to_string() + file_name;
+    new_path.push(new_file_name);
+
+    return new_path;
 }
 
 // get file creation DateTime via EXIF, MP4 Metadata, file system properties or the local time
