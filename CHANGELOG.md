@@ -6,6 +6,11 @@ SPDX-License-Identifier: EUPL-1.2
 
 # import_converter Change Log
 
+## 0.1.2
+
+* updated Cargo.toml to recent crate versions
+* NOT_FIXED: not yet able to remove direct GitHub URL for mp4 crate from Cargo.toml, as the necessary changes have not yet been released
+
 ## 0.1.1
 
 * OS agnostic handling of file system differences, e.g. the directory delimiters \ and /

@@ -3,7 +3,7 @@
 
 [package]
 name = "import_converter"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -12,7 +12,11 @@ edition = "2021"
 config = "0.13.1"
 glob = "0.3.1"
 kamadak-exif = "0.5.5"
-chrono ="0.4.31"
+chrono = { version = "0.4.31", features = ["serde"] }
 #mp4 = "0.14.0"
-# change back to official create when changes to avc1.rs are integrated into 0.15.0
+# change back to official create when #80 ? (mdat size?) changes to avc1.rs are integrated into 0.15.0
 mp4 = {git = "https://github.com/alfg/mp4-rust.git", branch = "master"}
+eframe = "0.28"
+egui = "0.28"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }

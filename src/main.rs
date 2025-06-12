@@ -13,8 +13,422 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::error;
 use std::fs;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+use std::thread;
+use eframe::egui;
+use serde::{Deserialize, Serialize};
 
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    // Options
+    pub dry_run: bool,
+    pub delete_source_files: bool,
+    
+    // Directories
+    pub source_dir: String,
+    pub destination_dir: String,
+    
+    // Extensions
+    pub copy_extensions: Vec<String>,
+    pub reencode_extensions: Vec<String>,
+    
+    // Organization
+    pub path_format: String,
+    pub filename_prefix: String,
+    
+    // Encoding
+    pub handbrake_cli: String,
+    pub handbrake_options: String,
+    pub new_file_extension: String,
+}
 
+impl AppSettings {
+    pub fn from_config() -> Result<Self, Box<dyn error::Error>> {
+        let settings = Config::builder()
+            .add_source(config::File::with_name("icsettings"))
+            .add_source(config::File::with_name("icsettings-user").required(false))
+            .add_source(config::Environment::with_prefix("ICONV"))
+            .build()?;
+
+        let copy_extensions: Vec<String> = settings.get_array("extensions.copy")?
+            .iter()
+            .map(|v| v.clone().into_string().unwrap_or_default())
+            .collect();
+            
+        let reencode_extensions: Vec<String> = settings.get_array("extensions.reencode")?
+            .iter()
+            .map(|v| v.clone().into_string().unwrap_or_default())
+            .collect();
+
+        Ok(AppSettings {
+            dry_run: settings.get_bool("options.dry-run")?,
+            delete_source_files: settings.get_bool("options.delete_source_files")?,
+            source_dir: settings.get_string("directories.source")?,
+            destination_dir: settings.get_string("directories.destination")?,
+            copy_extensions,
+            reencode_extensions,
+            path_format: settings.get_string("organisation.path_format")?,
+            filename_prefix: settings.get_string("organisation.filename_prefix")?,
+            handbrake_cli: settings.get_string("encoding.handbrakeCLI")?,
+            handbrake_options: settings.get_string("encoding.options")?,
+            new_file_extension: settings.get_string("encoding.new_file_extension")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ProcessingMessage {
+    Progress(String),
+    FileProcessed(String),
+    Summary(String),
+    Error(String),
+    Finished,
+}
+
+pub struct ImportConverterApp {
+    settings: AppSettings,
+    processing: bool,
+    progress_receiver: Option<mpsc::Receiver<ProcessingMessage>>,
+    log_messages: Vec<String>,
+    copy_extensions_text: String,
+    reencode_extensions_text: String,
+}
+
+impl Default for ImportConverterApp {
+    fn default() -> Self {
+        let settings = AppSettings::from_config().unwrap_or_default();
+        let copy_extensions_text = settings.copy_extensions.join(", ");
+        let reencode_extensions_text = settings.reencode_extensions.join(", ");
+        
+        Self {
+            settings,
+            processing: false,
+            progress_receiver: None,
+            log_messages: Vec::new(),
+            copy_extensions_text,
+            reencode_extensions_text,
+        }
+    }
+}
+
+impl eframe::App for ImportConverterApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check for progress messages
+        if let Some(receiver) = &self.progress_receiver {
+            while let Ok(message) = receiver.try_recv() {
+                match message {
+                    ProcessingMessage::Progress(msg) => {
+                        self.log_messages.push(msg);
+                    }
+                    ProcessingMessage::FileProcessed(msg) => {
+                        self.log_messages.push(msg);
+                    }
+                    ProcessingMessage::Summary(msg) => {
+                        self.log_messages.push(msg);
+                    }
+                    ProcessingMessage::Error(msg) => {
+                        self.log_messages.push(format!("ERROR: {}", msg));
+                    }
+                    ProcessingMessage::Finished => {
+                        self.processing = false;
+                        //self.progress_receiver = None;
+                        self.log_messages.push("Processing completed!".to_string());
+                    }
+                }
+                ctx.request_repaint();
+            }
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Import Converter");
+            
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // Options Section
+                ui.collapsing("Options", |ui| {
+                    ui.checkbox(&mut self.settings.dry_run, "Dry run (don't actually process files)");
+                    ui.checkbox(&mut self.settings.delete_source_files, "Delete source files after processing");
+                });
+
+                ui.separator();
+
+                // Directories Section
+                ui.collapsing("Directories", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Source Directory:");
+                        ui.text_edit_singleline(&mut self.settings.source_dir);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Destination Directory:");
+                        ui.text_edit_singleline(&mut self.settings.destination_dir);
+                    });
+                });
+
+                ui.separator();
+
+                // Extensions Section
+                ui.collapsing("File Extensions", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Copy Extensions:");
+                        ui.text_edit_singleline(&mut self.copy_extensions_text);
+                    });
+                    ui.small("Comma-separated list (e.g., *.JPG, *.JPEG)");
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Reencode Extensions:");
+                        ui.text_edit_singleline(&mut self.reencode_extensions_text);
+                    });
+                    ui.small("Comma-separated list (e.g., *.MOV)");
+                });
+
+                ui.separator();
+
+                // Organization Section
+                ui.collapsing("Organization", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Path Format:");
+                        ui.text_edit_singleline(&mut self.settings.path_format);
+                    });
+                    ui.small("Date format for folder structure (e.g., %Y\\%m\\%Y-%m-%d)");
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Filename Prefix:");
+                        ui.text_edit_singleline(&mut self.settings.filename_prefix);
+                    });
+                    ui.small("Prefix for filenames (e.g., %Y-%m-%d_)");
+                });
+
+                ui.separator();
+
+                // Encoding Section
+                ui.collapsing("Encoding Settings", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("HandBrakeCLI Path:");
+                        ui.text_edit_singleline(&mut self.settings.handbrake_cli);
+                    });
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("HandBrake Options:");
+                        ui.text_edit_singleline(&mut self.settings.handbrake_options);
+                    });
+                    ui.small("CLI options for encoding (e.g., -e nvenc_h264 -q 22 -B 160)");
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("New File Extension:");
+                        ui.text_edit_singleline(&mut self.settings.new_file_extension);
+                    });
+                });
+
+                ui.separator();
+
+                // Process Button
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!self.processing, egui::Button::new("Start Processing")).clicked() {
+                        self.start_processing();
+                    }
+                    
+                    if self.processing {
+                        ui.spinner();
+                        ui.label("Processing...");
+                    }
+                });
+
+                ui.separator();
+
+                // Log Output
+                ui.collapsing("Log Output", |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for message in &self.log_messages {
+                                ui.label(message);
+                            }
+                        });
+                    
+                    if ui.button("Clear Log").clicked() {
+                        self.log_messages.clear();
+                    }
+                });
+            });
+        });
+    }
+}
+
+impl ImportConverterApp {
+    fn start_processing(&mut self) {
+        // Parse extensions from text
+        self.settings.copy_extensions = self.copy_extensions_text
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+            
+        self.settings.reencode_extensions = self.reencode_extensions_text
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let (tx, rx) = mpsc::channel();
+        self.progress_receiver = Some(rx);
+        self.processing = true;
+        self.log_messages.clear();
+
+        let settings = self.settings.clone();
+        thread::spawn(move || {
+            process_files(settings, tx);
+        });
+    }
+}
+
+fn process_files(settings: AppSettings, tx: mpsc::Sender<ProcessingMessage>) {
+    let _ = tx.send(ProcessingMessage::Progress("Starting file processing...".to_string()));
+
+    // Build mask list
+    let mut all_masks: Vec<MaskEntry> = Vec::new();
+    for ext in &settings.copy_extensions {
+        all_masks.push(MaskEntry { extension: ext.clone(), reencode: false });
+    }
+    for ext in &settings.reencode_extensions {
+        all_masks.push(MaskEntry { extension: ext.clone(), reencode: true });
+    }
+
+    let _ = tx.send(ProcessingMessage::Progress(format!("Configured {} file masks", all_masks.len())));
+
+    // File discovery
+    let mut all_files: Vec<FileEntry> = Vec::new();
+    let _ = tx.send(ProcessingMessage::Progress("Discovering files...".to_string()));
+
+    for mask in &all_masks {
+        let mut source_dir = PathBuf::from(&settings.source_dir);
+        source_dir.push("**");
+        source_dir.push(&mask.extension);
+        
+        if let Ok(entries) = glob(source_dir.as_path().to_str().unwrap_or_default()) {
+            for entry in entries {
+                match entry {
+                    Ok(path) => {
+                        if let Ok(file_entry) = build_file_entry(&settings, &path, &mask) {
+                            all_files.push(file_entry);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ProcessingMessage::Error(format!("Glob error: {:?}", e)));
+                    }
+                }
+            }
+        }
+    }
+
+    let len_sum: u64 = all_files.iter().map(|f| f.len).sum();
+    let len_sum_mb = len_sum as f32 / (1024.0 * 1024.0);
+    let _ = tx.send(ProcessingMessage::Progress(format!("Found {} files (total of {:.2} MB)", all_files.len(), len_sum_mb)));
+
+    // Display planned actions
+    for entry in &all_files {
+        let len_mb = entry.len as f32 / (1024.0 * 1024.0);
+        let _ = tx.send(ProcessingMessage::Progress(format!(
+            "{} ({:.2} MB) - taken {:?} ({}) --> {} ({})",
+            entry.source_path.display(),
+            len_mb,
+            entry.creation_date,
+            entry.creation_date_source,
+            entry.destination_path.display(),
+            if entry.reencode { "reencode" } else { "copy" }
+        )));
+    }
+
+    if settings.dry_run {
+        let _ = tx.send(ProcessingMessage::Progress("Dry run configured - no files will be processed.".to_string()));
+        let _ = tx.send(ProcessingMessage::Finished);
+        return;
+    }
+
+    // Process files
+    let _ = tx.send(ProcessingMessage::Progress(format!("Processing {} files...", all_files.len())));
+    let mut processed_files = all_files;
+    
+    for entry in &mut processed_files {
+        // Create destination directory
+        if let Some(parent) = entry.destination_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                let _ = tx.send(ProcessingMessage::Error(format!("Failed to create directory: {:?}", e)));
+                continue;
+            }
+        }
+
+        if entry.reencode {
+            // Reencode with HandBrake
+            let _ = tx.send(ProcessingMessage::Progress(format!("Reencoding: {}", entry.source_path.display())));
+            
+            let mut hndbrk = std::process::Command::new(&settings.handbrake_cli);
+            hndbrk.args(["-i", &entry.source_path.display().to_string()])
+                .args(["-o", &entry.destination_path.display().to_string()])
+                .args(settings.handbrake_options.split_ascii_whitespace());
+
+            match hndbrk.spawn() {
+                Ok(mut child) => {
+                    match child.wait() {
+                        Ok(status) => {
+                            entry.success = status.success();
+                            if entry.success {
+                                if let Ok(metadata) = fs::metadata(&entry.destination_path) {
+                                    entry.len_after_action = metadata.len();
+                                }
+                                let _ = tx.send(ProcessingMessage::FileProcessed(format!("Reencoded: {}", entry.destination_path.display())));
+                            } else {
+                                let _ = tx.send(ProcessingMessage::Error(format!("HandBrake failed for: {}", entry.source_path.display())));
+                            }
+                        }
+                        Err(e) => {
+                            entry.success = false;
+                            let _ = tx.send(ProcessingMessage::Error(format!("HandBrake execution error: {:?}", e)));
+                        }
+                    }
+                }
+                Err(e) => {
+                    entry.success = false;
+                    let _ = tx.send(ProcessingMessage::Error(format!("Failed to start HandBrake: {:?}", e)));
+                }
+            }
+        } else {
+            // Copy file
+            let _ = tx.send(ProcessingMessage::Progress(format!("Copying: {}", entry.source_path.display())));
+            
+            match fs::copy(&entry.source_path, &entry.destination_path) {
+                Ok(bytes_copied) => {
+                    entry.len_after_action = bytes_copied;
+                    entry.success = true;
+                    let len_mb = bytes_copied as f32 / (1024.0 * 1024.0);
+                    let _ = tx.send(ProcessingMessage::FileProcessed(format!("Copied: {} ({:.2} MB)", entry.destination_path.display(), len_mb)));
+                }
+                Err(e) => {
+                    entry.success = false;
+                    let _ = tx.send(ProcessingMessage::Error(format!("Copy error: {:?}", e)));
+                }
+            }
+        }
+    }
+
+    // Generate summary
+    let len_sum_after: u64 = processed_files.iter().map(|f| f.len_after_action).sum();
+    let len_sum_after_mb = len_sum_after as f32 / (1024.0 * 1024.0);
+    let success_count: u32 = processed_files.iter().map(|f| if f.success { 1 } else { 0 }).sum();
+    let reencode_success_count: u32 = processed_files.iter().map(|f| if f.reencode && f.success { 1 } else { 0 }).sum();
+    let copy_success_count: u32 = processed_files.iter().map(|f| if !f.reencode && f.success { 1 } else { 0 }).sum();
+    let reencode_fail_count: u32 = processed_files.iter().map(|f| if f.reencode && !f.success { 1 } else { 0 }).sum();
+    let copy_fail_count: u32 = processed_files.iter().map(|f| if !f.reencode && !f.success { 1 } else { 0 }).sum();
+
+    let _ = tx.send(ProcessingMessage::Summary("=== Summary ===".to_string()));
+    let _ = tx.send(ProcessingMessage::Summary(format!("Total files: {}, Successfully processed: {}", processed_files.len(), success_count)));
+    let _ = tx.send(ProcessingMessage::Summary(format!("Copy: {} success, {} failed", copy_success_count, copy_fail_count)));
+    let _ = tx.send(ProcessingMessage::Summary(format!("Reencode: {} success, {} failed", reencode_success_count, reencode_fail_count)));
+    let _ = tx.send(ProcessingMessage::Summary(format!("File size: before {:.2} MB, after {:.2} MB", len_sum_mb, len_sum_after_mb)));
+
+    let _ = tx.send(ProcessingMessage::Finished);
+}
+
+// Rest of the existing structs and functions
 pub struct MaskEntry {
     extension: String,
     reencode: bool,
@@ -49,153 +463,11 @@ pub struct FileEntry {
     len_after_action: u64,
 }
 
-fn main() {
-    println!("import_converter");
-
-    // read settings
-    let settings = Config::builder()
-        .add_source(config::File::with_name("icsettings"))
-        .add_source(config::File::with_name("icsettings-user").required(false))
-        .add_source(config::Environment::with_prefix("ICONV"))
-        .build()
-        .expect("unable to read settings (icsettings.toml needed, icsettings-user.toml optional)");
-
-    // mask list
-    let mut all_masks: Vec<MaskEntry> = Vec::new();
-    for ext in settings.get_array("extensions.copy").expect("setting extensions.copy not found") {
-        all_masks.push(MaskEntry { extension: ext.into_string().expect("setting extension.copy entry invalid"), reencode: false });
-    }
-    for ext in settings.get_array("extensions.reencode").expect("setting extensions.reencode not found") {
-        all_masks.push(MaskEntry { extension: ext.into_string().expect("setting extension.reencode entry invalid"), reencode: true });
-    }
-    for entry in &all_masks {
-        println!("{} --> reencode: {:?}", entry.extension, entry.reencode);
-    }
-
-    // file list
-    let mut all_files: Vec<FileEntry> = Vec::new();
-
-    // discover files
-    println!("collecting files...");
-    for mask in &all_masks {
-        // build glob pattern for each extension in an OS independent way by using PathBuf
-        let mut source_dir = PathBuf::from(settings.get_string("directories.source").expect("setting directories.source not found"));
-        source_dir.push("**");
-        source_dir.push(&mask.extension);
-        for entry in glob(source_dir.as_path().to_str().expect("error building glob pattern")).expect("Failed to read glob pattern") {
-            match entry {
-                Ok(path) => {
-                    // add entry
-                    all_files.push(build_file_entry(&settings, &path, &mask));
-                },
-                Err(e) => println!("{:?}", e),
-            }
-        }
-    }
-
-    // display files and planned actions
-    let len_sum: u64 = all_files.iter().map(|f| f.len).sum();
-    let len_sum_mb = len_sum as f32 / (1024.0 * 1024.0);
-    println!("found {} files (total of {len_sum_mb:.2} MB):", all_files.len());
-    for entry in &all_files {
-        let len_mb = entry.len as f32 / (1024.0 * 1024.0);
-        println!("{} ({:.2} MB) - taken {:?} ({}) --> {} ({})",
-            entry.source_path.display().to_string(), len_mb, entry.creation_date, entry.creation_date_source.to_string(),
-            entry.destination_path.display().to_string(), if entry.reencode {"reencode"} else {"copy"});
-    }
-
-    // dry run ends here
-    if settings.get_bool("options.dry-run").expect("setting options.dry-run not found") {
-        println!("Dry run configured --> exiting.");
-        return;
-    }
-
-    // process the files as planned
-    println!("processing {} files...", all_files.len());
-    for entry in &mut all_files {
-        // make sure destination directory exists (otherwise handbrake will fail)
-        fs::create_dir_all(entry.destination_path.parent().expect("entry destination path broken")).expect("create_dir_all failed for entry");
-
-        if entry.reencode {
-            // reencode
-            let handbrake_cli = settings.get_string("encoding.handbrakeCLI").expect("setting encoding.handbrakeCLI not found");
-            let handbrake_options = settings.get_string("encoding.options").expect("setting encoding.options not found");
-            // https://handbrake.fr/docs/en/latest/cli/cli-options.html
-            let handbrake_call = format!("\"{}\" -i \"{}\" -o \"{}\" {}",
-                handbrake_cli,
-                entry.source_path.display(), entry.destination_path.display(),
-                handbrake_options);
-            println!("{handbrake_call:}");
-
-            // call handbrake
-            let mut hndbrk = std::process::Command::new(handbrake_cli);
-            hndbrk.args(["-i", &entry.source_path.display().to_string()])
-                .args(["-o", &entry.destination_path.display().to_string()])
-                .args(handbrake_options.split_ascii_whitespace());
-
-            let mut child = hndbrk.spawn().expect("failed to execute HandbrakeCLI");
-
-            let status = child.wait();
-            match status {
-                Ok(status) => {
-                    entry.success = status.success();
-                    println!("Handbrake execution finished, status --> {:?}", entry.success);
-                    if entry.success {
-                        // file size
-                        let metadata = fs::metadata(&entry.destination_path);
-                        entry.len_after_action = metadata.expect("unable to read file metadata").len();
-                    }
-                },
-                Err(e) => {
-                    entry.success = false;
-                    println!("Handbrake execution error --> {:?}", e);
-                },
-            }
-            
-        } else {
-            // copy
-            match fs::copy(&entry.source_path, &entry.destination_path) {
-                Ok(bytes_copied) => {
-                    entry.len_after_action = bytes_copied;
-                    entry.success = true;
-                    let len_mb = bytes_copied as f32 / (1024.0 * 1024.0);
-                    println!("{:?} copied --> {:?} ({:.2} MB)", entry.source_path, entry.destination_path, len_mb);
-                },
-                Err(e) => {
-                    entry.success = false;
-                    println!("Copy error --> {:?}", e);
-                },
-            }
-        }
-    }
-
-    // todo: refactor creation_date function (--> impl for FileEntry?)
-    // todo: if configured, delete source files after successful operation
+fn build_file_entry(settings: &AppSettings, path: &PathBuf, mask: &MaskEntry) -> Result<FileEntry, Box<dyn error::Error>> {
+    let (dto, dto_source) = get_file_creation(&path)?;
+    let metadata = fs::metadata(&path)?;
+    let file_len = metadata.len();
     
-    // show summary (e.g. total size before/after, files copied/reencoded, etc)
-    let len_sum_after: u64 = all_files.iter().map(|f| f.len_after_action).sum();
-    let len_sum_after_mb = len_sum_after as f32 / (1024.0 * 1024.0);
-    let success_count: u32 = all_files.iter().map(|f| if f.success {1} else {0}).sum();
-    let reencode_success_count: u32 = all_files.iter().map(|f| if f.reencode && f.success {1} else {0}).sum();
-    let copy_success_count: u32 = all_files.iter().map(|f| if !f.reencode && f.success {1} else {0}).sum();
-    let reencode_fail_count: u32 = all_files.iter().map(|f| if f.reencode && !f.success {1} else {0}).sum();
-    let copy_fail_count: u32 = all_files.iter().map(|f| if !f.reencode && !f.success {1} else {0}).sum();
-    println!("");
-    println!("__Summary__");
-    println!("Total number of files: {}, of these successfuly processed: {success_count}", all_files.len());
-    println!("Copy:     success count: {copy_success_count}, fail count: {copy_fail_count}");
-    println!("Reencode: success count: {reencode_success_count}, fail count: {reencode_fail_count}");
-    println!("Filesize: before: {len_sum_mb:.2} MB, after: {len_sum_after_mb:.2} MB");
-    
-}
-
-fn build_file_entry(settings: &Config, path: &PathBuf, mask: &MaskEntry) -> FileEntry {
-    // get file creation date
-    let (dto, dto_source) = get_file_creation(&path).expect("failed to get file creation date");
-    // file size
-    let metadata = fs::metadata(&path);
-    let file_len = metadata.expect("failed to read file metadata").len();
-    // build FileEntry
     let mut result = FileEntry {
         source_path: PathBuf::from(&path.display().to_string()),
         destination_path: build_destination_path(&settings, &dto, &path),
@@ -205,101 +477,80 @@ fn build_file_entry(settings: &Config, path: &PathBuf, mask: &MaskEntry) -> File
         reencode: mask.reencode,
         success: false,
         len_after_action: 0,
-     };
+    };
     
-    // change file extension
     if result.reencode {
-        result.destination_path.set_extension(settings.get_string("encoding.new_file_extension").expect("setting encoding.new_file_extension not found"));
+        result.destination_path.set_extension(&settings.new_file_extension);
     }
 
-    return result;
+    Ok(result)
 }
 
-fn build_destination_path(settings: &Config, dto: &NaiveDateTime, path: &PathBuf) -> PathBuf {
-    let destination = settings.get_string("directories.destination").expect("setting directories.destination not found");
-    let destination_format = settings.get_string("organisation.path_format").expect("setting organisation.path_format not found");
-    let new_subpath = dto.format(&destination_format);
-    let prefix_format = settings.get_string("organisation.filename_prefix").expect("setting organisation.filename_prefix not found");
-    let prefix = dto.format(&prefix_format);
-    let file_name = path.file_name().expect("filename not part of destination path").to_str().expect("filename to string failed");
-    // build new path in an OS independent way
-    let mut new_path = PathBuf::from(destination);
+fn build_destination_path(settings: &AppSettings, dto: &NaiveDateTime, path: &PathBuf) -> PathBuf {
+    let new_subpath = dto.format(&settings.path_format);
+    let prefix = dto.format(&settings.filename_prefix);
+    let file_name = path.file_name().unwrap().to_str().unwrap();
+    
+    let mut new_path = PathBuf::from(&settings.destination_dir);
     new_path.push(new_subpath.to_string());
     let new_file_name = prefix.to_string() + file_name;
     new_path.push(new_file_name);
 
-    return new_path;
+    new_path
 }
 
-// get file creation DateTime via EXIF, MP4 Metadata, file system properties or the local time
-fn get_file_creation(path: &std::path::Path) -> Result<(chrono::NaiveDateTime, DateSource), Box<dyn error::Error>>  {
-    // try EXIF first
-    {
-        let file = std::fs::File::open(path)?;
+fn get_file_creation(path: &std::path::Path) -> Result<(chrono::NaiveDateTime, DateSource), Box<dyn error::Error>> {
+    // Try EXIF first
+    if let Ok(file) = std::fs::File::open(path) {
         let mut bufreader = std::io::BufReader::new(&file);
         let exifreader = exif::Reader::new();
-        let exif = exifreader.read_from_container(&mut bufreader);
-
-        /*
-        for f in exif.fields() {
-            println!("{} {} {}",
-                    f.tag, f.ifd_num, f.display_value().with_unit(&exif));
-        }
-        */
-
-        match exif {
-            Ok(exif) => {
-                match exif.get_field(Tag::DateTimeOriginal, In::PRIMARY) {
-                    Some(dto) => {
-                        let ds: &str = &dto.display_value().to_string();
-                        let dt = chrono::NaiveDateTime::parse_from_str(ds, "%Y-%m-%d %H:%M:%S")?;
-                        return Ok((dt, DateSource::Exif));
-                    },
-                    None => eprintln!("creation tag is missing"),
+        if let Ok(exif) = exifreader.read_from_container(&mut bufreader) {
+            if let Some(dto) = exif.get_field(Tag::DateTimeOriginal, In::PRIMARY) {
+                let ds: &str = &dto.display_value().to_string();
+                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ds, "%Y-%m-%d %H:%M:%S") {
+                    return Ok((dt, DateSource::Exif));
                 }
-            }
-            Err(_) => {
-                //println!("EXIF Reader: {:?}", e);
             }
         }
     }
 
-    // try to read metadata from MOV file format
-    {
-        let f = File::open(path)?;
-        let mp4 = mp4::read_mp4(f);
-
-        match mp4 {
-            Ok(mp4) => {
-                let mut creation_time = mp4.moov.mvhd.creation_time;
-                // convert from MP4 epoch (1904-01-01) to Unix epoch (1970-01-01)
-                if creation_time >= 2082844800 {
-                    creation_time -= 2082844800
-                }
-                // https://stackoverflow.com/questions/72884445/chrono-datetime-from-u64-unix-timestamp-in-rust
-                if let chrono::LocalResult::Single(dtl) = chrono::Local.timestamp_opt(creation_time as i64, 0){
-                    let dtn = dtl.naive_local();
-                    return Ok((dtn, DateSource::Mp4Metadata));
-                }                
-            },
-            Err(_) => {
-                //println!("MP4 Reader: {:?}", e);
-            },
+    // Try MP4 metadata
+    if let Ok(f) = File::open(path) {
+        if let Ok(mp4) = mp4::read_mp4(f) {
+            let mut creation_time = mp4.moov.mvhd.creation_time;
+            if creation_time >= 2082844800 {
+                creation_time -= 2082844800;
+            }
+            if let chrono::LocalResult::Single(dtl) = chrono::Local.timestamp_opt(creation_time as i64, 0) {
+                let dtn = dtl.naive_local();
+                return Ok((dtn, DateSource::Mp4Metadata));
+            }
         }
-        
     }
 
-    // fallback to filesystem information
+    // Fallback to filesystem
     let metadata = fs::metadata(path)?;
-    // ToDo: use modified and created and use the older date    
     if let Ok(time) = metadata.modified() {
-        let dtl: chrono::DateTime<Local> = time.clone().into();
+        let dtl: chrono::DateTime<Local> = time.into();
         let dtn = dtl.naive_local();
         return Ok((dtn, DateSource::FileSystem));
-    } else {
-        println!("filesystem metadata 'modified' not supported");
     }
 
-    // fallback to current time
+    // Fallback to current time
     Ok((Local::now().naive_local(), DateSource::LocalTime))
+}
+
+fn main() -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 600.0])
+            .with_min_inner_size([600.0, 400.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Import Converter",
+        options,
+        Box::new(|_cc| Ok(Box::new(ImportConverterApp::default()))),
+    )
 }
